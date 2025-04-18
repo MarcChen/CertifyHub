@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "certifyhub"
+version = "0.1.0"
+description = "A tool for scraping and serving certification exam practice questions"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+playwright = "^1.51.0"
+pytest = "^7.0.0"
+pytest-playwright = "^0.4.0"
+rich = "^13.6.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
