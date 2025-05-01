@@ -11,6 +11,7 @@ import json
 import os
 import random
 import time
+import argparse
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import urllib.parse
@@ -22,8 +23,24 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 # Configure rich console for output
 console = Console()
 
-# Target URL
-TARGET_URL = "https://www.examtopics.com/exams/hashicorp/terraform-associate/view/"
+# Certification configurations
+CERTIFICATION_CONFIGS = {
+    "terraform-associate": {
+        "provider": "hashicorp",
+        "display_name": "Terraform Associate",
+        "url_pattern": r"https://www\.examtopics\.com/discussions/hashicorp/view/\d+-exam-terraform-associate-topic-(\d+)-question-(\d+)-discussion/",
+        "target_url": "https://www.examtopics.com/exams/hashicorp/terraform-associate/view/"
+    },
+    "professional-machine-learning-engineer": {
+        "provider": "google",
+        "display_name": "Professional Machine Learning Engineer",
+        "url_pattern": r"https://www\.examtopics\.com/discussions/google/view/\d+-exam-professional-machine-learning-engineer-topic-(\d+)-question-(\d+)-discussion/",
+        "target_url": "https://www.examtopics.com/exams/google/professional-machine-learning-engineer/view/"
+    }
+}
+
+# Default certification
+DEFAULT_CERT = "professional-machine-learning-engineer"
 
 # Alternative search engines to bypass Google restrictions
 SEARCH_ENGINES = [
@@ -33,20 +50,14 @@ SEARCH_ENGINES = [
     # {"name": "Yahoo", "url": "https://search.yahoo.com/search?p={query}"},
 ]
 
-# Output directory
-OUTPUT_DIR = Path("data/terraform-associate")
-
 # User agents to rotate
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+    # "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 11_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Safari/605.1.15",
+    # "Mozilla/5.0 (Macintosh; Intel Mac OS X 11_5_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Safari/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36",
 ]
-
-# Expected URL pattern for ExamTopics discussions
-EXAMTOPICS_URL_PATTERN = r"https://www\.examtopics\.com/discussions/hashicorp/view/\d+-exam-terraform-associate-topic-(\d+)-question-(\d+)-discussion/"
 
 
 async def setup_browser_context(playwright) -> Tuple[BrowserContext, Page]:
@@ -61,7 +72,7 @@ async def setup_browser_context(playwright) -> Tuple[BrowserContext, Page]:
     """
     # Use a random user agent
     user_agent = random.choice(USER_AGENTS)
-    
+    print(f"[bold green]Using User-Agent:[/] {user_agent}")
     # Set up the browser with specific configurations to avoid detection
     browser = await playwright.chromium.launch(
         headless=False,  # Set to True in production for better performance
@@ -80,7 +91,7 @@ async def setup_browser_context(playwright) -> Tuple[BrowserContext, Page]:
     # Create a context with specific device settings
     context = await browser.new_context(
         user_agent=user_agent,
-        viewport={"width": 1920, "height": 1080},
+        viewport={"width": 950, "height": 1080},
         locale="en-US",
         timezone_id="America/New_York",
         permissions=["geolocation"],
@@ -106,7 +117,7 @@ async def setup_browser_context(playwright) -> Tuple[BrowserContext, Page]:
     return context, page
 
 
-def is_valid_examtopics_url(url: str, topic_number: int, question_number: int) -> bool:
+def is_valid_examtopics_url(url: str, topic_number: int, question_number: int, url_pattern: str) -> bool:
     """
     Validate that the URL matches the expected ExamTopics URL pattern for the given topic and question.
     
@@ -114,6 +125,7 @@ def is_valid_examtopics_url(url: str, topic_number: int, question_number: int) -
         url: The URL to validate
         topic_number: The expected topic number
         question_number: The expected question number
+        url_pattern: The regex pattern to match against
         
     Returns:
         True if the URL matches the expected pattern with correct topic and question numbers
@@ -123,7 +135,7 @@ def is_valid_examtopics_url(url: str, topic_number: int, question_number: int) -
         return False
     
     # Match against the specific pattern
-    match = re.search(EXAMTOPICS_URL_PATTERN, url)
+    match = re.search(url_pattern, url)
     if match:
         # Extract topic and question numbers from the URL
         url_topic = int(match.group(1))
@@ -141,7 +153,7 @@ def is_valid_examtopics_url(url: str, topic_number: int, question_number: int) -
     return False
 
 
-async def search_and_find_link(query: str, topic_number: int, question_number: int) -> Optional[str]:
+async def search_and_find_link(query: str, topic_number: int, question_number: int, url_pattern: str) -> Optional[str]:
     """
     Search for a query using multiple search engines and find a link to ExamTopics.
     
@@ -149,6 +161,7 @@ async def search_and_find_link(query: str, topic_number: int, question_number: i
         query: The search query
         topic_number: The topic number to validate in the URL
         question_number: The question number to validate in the URL
+        url_pattern: The regex pattern to match against
         
     Returns:
         The URL to the ExamTopics page or None if not found
@@ -187,7 +200,7 @@ async def search_and_find_link(query: str, topic_number: int, question_number: i
                 for link in all_links:
                     href = await link.get_attribute("href")
                     
-                    if href and is_valid_examtopics_url(href, topic_number, question_number):
+                    if href and is_valid_examtopics_url(href, topic_number, question_number, url_pattern):
                         console.print(f"[green]Found valid ExamTopics link via {engine['name']}![/]")
                         await context.close()
                         return href
@@ -278,20 +291,24 @@ async def human_like_scroll(page: Page):
         await asyncio.sleep(random.uniform(0.2, 1.0))
 
 
-async def scrape_exam_page(url: str) -> Dict[str, Any]:
+async def scrape_exam_page(certification: str) -> Dict[str, Any]:
     """
     Scrapes an exam page from ExamTopics and extracts the questions and answers.
 
     Args:
-        url: The URL of the exam page to scrape
+        certification: The certification key from CERTIFICATION_CONFIGS
 
     Returns:
         Dictionary containing the extracted exam data
     """
-    console.print(f"[bold blue]Scraping exam page:[/] {url}")
+    config = CERTIFICATION_CONFIGS[certification]
+    url = config["target_url"]
+    output_dir = Path(f"data/{certification}")
+    
+    console.print(f"[bold blue]Scraping exam page for {config['display_name']}:[/] {url}")
 
     # Create output directory if it doesn't exist
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     exam_data = {
         "title": "",
@@ -371,7 +388,7 @@ async def scrape_exam_page(url: str) -> Dict[str, Any]:
         await context.close()
     
     # Save to JSON file
-    output_file = OUTPUT_DIR / "terraform_associate_questions.json"
+    output_file = output_dir / f"{certification}_questions.json"
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(exam_data, f, indent=2)
     
@@ -379,11 +396,12 @@ async def scrape_exam_page(url: str) -> Dict[str, Any]:
     return exam_data
 
 
-async def scrape_specific_questions(topic_number: int, start_question: int, end_question: int = None) -> List[Dict[str, Any]]:
+async def scrape_specific_questions(certification: str, topic_number: int, start_question: int, end_question: int = None) -> List[Dict[str, Any]]:
     """
     Searches for specific exam questions and scrapes the details from ExamTopics.
     
     Args:
+        certification: The certification key from CERTIFICATION_CONFIGS
         topic_number: The topic number of the questions
         start_question: The starting question number to search for
         end_question: The ending question number (inclusive). If None, only scrapes the start_question
@@ -391,8 +409,14 @@ async def scrape_specific_questions(topic_number: int, start_question: int, end_
     Returns:
         List of dictionaries containing the extracted question data
     """
+    config = CERTIFICATION_CONFIGS[certification]
+    output_dir = Path(f"data/{certification}")
+    url_pattern = config["url_pattern"]
+    display_name = config["display_name"]
+    provider = config["provider"]
+    
     # Create output directory if it doesn't exist
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # If end_question is not specified, only scrape the start_question
     if end_question is None:
@@ -405,17 +429,17 @@ async def scrape_specific_questions(topic_number: int, start_question: int, end_
         console.print("[red]Error:[/] start_question must be less than or equal to end_question")
         return results
     
-    console.print(f"[bold blue]Scraping Terraform Associate Topic {topic_number} Questions {start_question} to {end_question}[/]")
+    console.print(f"[bold blue]Scraping {display_name} Topic {topic_number} Questions {start_question} to {end_question}[/]")
     
     for question_number in range(start_question, end_question + 1):
         try:
             console.print(f"[bold cyan]Processing Question {question_number}...[/]")
             
             # Construct search query
-            search_query = f"examtopics Exam Terraform Associate topic {topic_number} question {question_number} discussion"
+            search_query = f"examtopics Exam {display_name} topic {topic_number} question {question_number} discussion"
             
             # Search for the link using our search engines
-            examtopics_link = await search_and_find_link(search_query, topic_number, question_number)
+            examtopics_link = await search_and_find_link(search_query, topic_number, question_number, url_pattern)
             
             # If we couldn't find the link, skip this question
             if not examtopics_link:
@@ -541,7 +565,7 @@ async def scrape_specific_questions(topic_number: int, start_question: int, end_
                     await context.close()
             
             # Save to JSON file
-            output_file = OUTPUT_DIR / f"terraform_associate_topic{topic_number}_q{question_number}.json"
+            output_file = output_dir / f"{certification}_topic{topic_number}_q{question_number}.json"
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(question_data, f, indent=2)
             
@@ -560,7 +584,7 @@ async def scrape_specific_questions(topic_number: int, start_question: int, end_
             console.print(f"[red]Failed to scrape question {question_number}:[/] {str(e)}")
     
     # Save the combined results
-    combined_output_file = OUTPUT_DIR / f"terraform_associate_topic{topic_number}_q{start_question}-q{end_question}.json"
+    combined_output_file = output_dir / f"{certification}_topic{topic_number}_q{start_question}-q{end_question}.json"
     with open(combined_output_file, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
     
@@ -570,10 +594,25 @@ async def scrape_specific_questions(topic_number: int, start_question: int, end_
 
 async def main():
     """Main entry point for the scraper"""
-    console.print("[bold]===== ExamTopics Terraform Associate Scraper =====")
+    parser = argparse.ArgumentParser(description='ExamTopics Scraper')
+    parser.add_argument('--certification', type=str, default=DEFAULT_CERT,
+                        choices=list(CERTIFICATION_CONFIGS.keys()),
+                        help='Certification to scrape')
+    parser.add_argument('--topic', type=int, default=1,
+                        help='Topic number to scrape')
+    parser.add_argument('--start', type=int, default=1,
+                        help='Starting question number')
+    parser.add_argument('--end', type=int, default=None,
+                        help='Ending question number (inclusive)')
     
-    # Run the improved function to scrape a range of questions
-    await scrape_specific_questions(1, 32, 33)  # Topic 1, Questions 32 to 33
+    args = parser.parse_args()
+    certification = args.certification
+    config = CERTIFICATION_CONFIGS[certification]
+    
+    console.print(f"[bold]===== ExamTopics {config['display_name']} Scraper =====")
+    
+    # Run scraper for the specified questions
+    await scrape_specific_questions(certification, args.topic, args.start, args.end)
 
 
 if __name__ == "__main__":
