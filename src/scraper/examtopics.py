@@ -291,108 +291,199 @@ async def human_like_scroll(page: Page):
         await asyncio.sleep(random.uniform(0.2, 1.0))
 
 
-async def scrape_exam_page(certification: str) -> Dict[str, Any]:
+async def scrape_exam_views(certification: str, view_numbers: List[int]) -> Dict[str, Any]:
     """
-    Scrapes an exam page from ExamTopics and extracts the questions and answers.
-
+    Scrapes exam views (pages with 10 questions each) from ExamTopics.
+    
     Args:
         certification: The certification key from CERTIFICATION_CONFIGS
-
+        view_numbers: List of view numbers to scrape (1, 2, etc.)
+        
     Returns:
-        Dictionary containing the extracted exam data
+        Dictionary containing the extracted exam data from all views
     """
     config = CERTIFICATION_CONFIGS[certification]
-    url = config["target_url"]
     output_dir = Path(f"data/{certification}")
+    provider = config["provider"]
+    display_name = config["display_name"]
     
-    console.print(f"[bold blue]Scraping exam page for {config['display_name']}:[/] {url}")
-
     # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    
+    all_questions = []
+    total_questions_count = 0
     exam_data = {
-        "title": "",
-        "description": "",
+        "title": f"{display_name} Exam Questions",
+        "description": f"Scraped from ExamTopics",
         "questions": []
     }
-
-    async with async_playwright() as p:
-        # Setup browser with anti-detection measures
-        context, page = await setup_browser_context(p)
+    
+    for view_number in view_numbers:
+        # Construct the URL for this view
+        view_url = f"{config['target_url']}{view_number}/"
+        console.print(f"[bold blue]Scraping {display_name} exam view #{view_number}:[/] {view_url}")
         
-        with console.status("[bold green]Loading page...") as status:
-            await page.goto(url, wait_until="domcontentloaded")
-            console.print("[green]✓[/] Page loaded")
-
-        # Extract title and description
-        exam_data["title"] = await page.title()
-        
-        # Extract exam description if available
-        try:
-            description_elem = await page.query_selector("div.exam-description")
-            if description_elem:
-                exam_data["description"] = await description_elem.text_content()
-        except Exception as e:
-            console.print(f"[yellow]Warning:[/] Could not extract description: {e}")
-
-        # Extract questions
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[bold blue]{task.description}"),
-            console=console
-        ) as progress:
-            task = progress.add_task("[bold blue]Extracting questions...", total=None)
+        async with async_playwright() as p:
+            # Setup browser with anti-detection measures
+            context, page = await setup_browser_context(p)
+            
+            with console.status(f"[bold green]Loading exam view page {view_number}...") as status:
+                try:
+                    await page.goto(view_url, wait_until="domcontentloaded", timeout=120000)
+                    console.print(f"[green]✓[/] View {view_number} page loaded")
+                    
+                    # Check if we need to solve a captcha
+                    if await check_and_solve_captcha(page):
+                        console.print(f"[yellow]Captcha detected. Waiting for manual solving...[/]")
+                        console.print("[bold yellow]Please solve the captcha in the browser window and press Enter when done.[/]")
+                        input()
+                except Exception as e:
+                    console.print(f"[red]Error loading view {view_number}: {str(e)}[/]")
+                    await context.close()
+                    continue
+            
+            # Extract total questions count if first view
+            if view_number == 1:
+                try:
+                    # Try to find the element that contains the total questions count
+                    questions_info = await page.query_selector(".examQa__item:nth-child(4)")
+                    if questions_info:
+                        text = await questions_info.inner_text()
+                        # Extract the number from text like "Exam Questions: 358"
+                        match = re.search(r"Questions:\s*(\d+)", text)
+                        if match:
+                            total_questions_count = int(match.group(1))
+                            console.print(f"[blue]Total questions for this exam: {total_questions_count}[/]")
+                except Exception as e:
+                    console.print(f"[yellow]Could not extract total questions count: {e}[/]")
             
             # Find all question elements
-            question_elements = await page.query_selector_all("div.exam-question-card")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                console=console
+            ) as progress:
+                task = progress.add_task(f"[bold blue]Extracting questions from view {view_number}...", total=None)
+                
+                # Query for all question cards
+                question_elements = await page.query_selector_all("div.exam-question-card")
+                
+                progress.update(task, total=len(question_elements))
+                progress.start_task(task)
+                
+                for i, question_elem in enumerate(question_elements):
+                    try:
+                        # Extract question number, topic, and text
+                        question_header = await question_elem.query_selector("div.card-header")
+                        question_full_number = await question_header.inner_text() if question_header else f"Question #{i+1}"
+                        
+                        # Parse question number from format like "Question #1"
+                        question_number_match = re.search(r"Question #(\d+)", question_full_number)
+                        question_number = int(question_number_match.group(1)) if question_number_match else (i + 1)
+                        
+                        # Extract topic
+                        topic_span = await question_elem.query_selector(".question-title-topic")
+                        topic = await topic_span.inner_text() if topic_span else "Unknown Topic"
+                        
+                        # Extract question body
+                        question_body = await question_elem.query_selector("div.question-body")
+                        question_id = await question_body.get_attribute("data-id") if question_body else None
+                        
+                        # Extract question text
+                        question_text_elem = await question_body.query_selector("p.card-text")
+                        question_text = await question_text_elem.inner_html() if question_text_elem else "No content found"
+                        # Clean up the question text
+                        question_text = question_text.strip()
+                        
+                        # Extract choices
+                        choices = []
+                        choices_container = await question_elem.query_selector("div.question-choices-container")
+                        if choices_container:
+                            choice_items = await choices_container.query_selector_all("li.multi-choice-item")
+                            
+                            for choice_item in choice_items:
+                                # Get letter (A, B, C, etc.)
+                                letter_elem = await choice_item.query_selector("span.multi-choice-letter")
+                                letter = await letter_elem.inner_text() if letter_elem else ""
+                                letter = letter.strip().replace(".", "")
+                                
+                                # Get full choice text
+                                choice_text = await choice_item.inner_text()
+                                # Remove the letter part from the text
+                                choice_text = choice_text.replace(f"{letter}.", "").strip()
+                                
+                                # Check if this choice is marked as correct
+                                is_correct = "correct-hidden" in (await choice_item.get_attribute("class") or "")
+                                
+                                choices.append({
+                                    "letter": letter,
+                                    "text": choice_text,
+                                    "is_correct": is_correct
+                                })
+                        
+                        # Get correct answer
+                        correct_answer = ""
+                        correct_answer_elem = await question_elem.query_selector("span.correct-answer")
+                        if correct_answer_elem:
+                            # Click on reveal solution if it exists
+                            reveal_btn = await question_elem.query_selector("a.reveal-solution")
+                            if reveal_btn:
+                                await reveal_btn.click()
+                                await asyncio.sleep(0.5)
+                                # Try to get the answer again after revealing it
+                                correct_answer_elem = await question_elem.query_selector("span.correct-answer")
+                            
+                            if correct_answer_elem:
+                                correct_answer = await correct_answer_elem.inner_text()
+                                correct_answer = correct_answer.strip()
+                        
+                        # Community votes data
+                        votes_data = []
+                        try:
+                            votes_script = await question_elem.query_selector(f"script#${question_id}")
+                            if votes_script:
+                                votes_json = await votes_script.inner_text()
+                                votes_data = json.loads(votes_json)
+                        except Exception as e:
+                            console.print(f"[yellow]Error parsing votes data: {e}[/]")
+                        
+                        # Create question object
+                        question_data = {
+                            "question_id": question_id,
+                            "question_number": question_number,
+                            "view_number": view_number,
+                            "topic": topic,
+                            "text": question_text,
+                            "choices": choices,
+                            "correct_answer": correct_answer,
+                            "community_votes": votes_data
+                        }
+                        
+                        exam_data["questions"].append(question_data)
+                        progress.update(task, advance=1)
+                        
+                    except Exception as e:
+                        console.print(f"[red]Error extracting question {i+1} in view {view_number}:[/] {str(e)}")
             
-            for i, question_elem in enumerate(question_elements):
-                try:
-                    # Extract question number and text
-                    question_header = await question_elem.query_selector("div.card-header")
-                    question_number = await question_header.text_content() if question_header else f"Question {i+1}"
-                    
-                    # Extract question content
-                    question_content = await question_elem.query_selector("div.question-body")
-                    question_text = await question_content.inner_text() if question_content else "No content found"
-                    
-                    # Extract answer choices
-                    answer_choices = []
-                    choices_elements = await question_elem.query_selector_all("div.multi-choice-item")
-                    for choice_elem in choices_elements:
-                        choice_text = await choice_elem.inner_text()
-                        # Clean up the choice text
-                        choice_text = choice_text.strip()
-                        answer_choices.append(choice_text)
-                    
-                    # Find discussion if available
-                    discussion = ""
-                    discussion_elem = await question_elem.query_selector("div.discussion-container")
-                    if discussion_elem:
-                        discussion = await discussion_elem.inner_text()
-                    
-                    # Create question object
-                    question_data = {
-                        "number": question_number.strip(),
-                        "text": question_text.strip(),
-                        "choices": answer_choices,
-                        "discussion": discussion.strip() if discussion else ""
-                    }
-                    
-                    exam_data["questions"].append(question_data)
-                    progress.update(task, description=f"Extracted {len(exam_data['questions'])} questions")
-                    
-                except Exception as e:
-                    console.print(f"[red]Error extracting question {i+1}:[/] {str(e)}")
+            await context.close()
             
-        await context.close()
+            # Add a delay between views to prevent blocking
+            if view_number < view_numbers[-1]:
+                delay = random.uniform(5, 10)
+                console.print(f"[cyan]Waiting {delay:.1f} seconds before processing next view...[/]")
+                await asyncio.sleep(delay)
+    
+    # Calculate a completion percentage
+    if total_questions_count > 0:
+        completion_percentage = (len(exam_data["questions"]) / total_questions_count) * 100
+        console.print(f"[green]Scraped {len(exam_data['questions'])} questions out of {total_questions_count} ({completion_percentage:.1f}%)[/]")
     
     # Save to JSON file
-    output_file = output_dir / f"{certification}_questions.json"
+    output_file = output_dir / f"{certification}_questions_views.json"
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(exam_data, f, indent=2)
     
-    console.print(f"[bold green]Successfully scraped and saved exam data to:[/] {output_file}")
+    console.print(f"[bold green]Successfully scraped and saved exam view data to:[/] {output_file}")
     return exam_data
 
 
@@ -436,7 +527,7 @@ async def scrape_specific_questions(certification: str, topic_number: int, start
             console.print(f"[bold cyan]Processing Question {question_number}...[/]")
             
             # Construct search query
-            search_query = f"examtopics Exam {display_name} topic {topic_number} question {question_number} discussion"
+            search_query = f"examtopics {provider} {display_name} topic {topic_number} question {question_number} discussion"
             
             # Search for the link using our search engines
             examtopics_link = await search_and_find_link(search_query, topic_number, question_number, url_pattern)
@@ -598,12 +689,16 @@ async def main():
     parser.add_argument('--certification', type=str, default=DEFAULT_CERT,
                         choices=list(CERTIFICATION_CONFIGS.keys()),
                         help='Certification to scrape')
+    parser.add_argument('--mode', type=str, choices=['views', 'search', 'both'], default='both',
+                        help='Scraping mode: views (scrape view pages), search (scrape specific questions), or both')
+    parser.add_argument('--views', type=str, default='1,2',
+                        help='Comma-separated list of view numbers to scrape (e.g., "1,2,3")')
     parser.add_argument('--topic', type=int, default=1,
-                        help='Topic number to scrape')
+                        help='Topic number to scrape (for search mode)')
     parser.add_argument('--start', type=int, default=1,
-                        help='Starting question number')
+                        help='Starting question number (for search mode)')
     parser.add_argument('--end', type=int, default=None,
-                        help='Ending question number (inclusive)')
+                        help='Ending question number (inclusive, for search mode)')
     
     args = parser.parse_args()
     certification = args.certification
@@ -611,8 +706,17 @@ async def main():
     
     console.print(f"[bold]===== ExamTopics {config['display_name']} Scraper =====")
     
-    # Run scraper for the specified questions
-    await scrape_specific_questions(certification, args.topic, args.start, args.end)
+    # Parse view numbers
+    view_numbers = [int(v.strip()) for v in args.views.split(',')]
+    
+    # Run the appropriate scraper mode(s)
+    if args.mode in ['views', 'both']:
+        console.print(f"[bold green]Starting views scraping mode for views: {view_numbers}[/]")
+        await scrape_exam_views(certification, view_numbers)
+    
+    if args.mode in ['search', 'both']:
+        console.print(f"[bold green]Starting search scraping mode for questions {args.start} to {args.end or args.start}[/]")
+        await scrape_specific_questions(certification, args.topic, args.start, args.end)
 
 
 if __name__ == "__main__":
